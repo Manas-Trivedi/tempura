@@ -9,7 +9,7 @@
         const stepExecutions: StepExecution[] = workflow.steps.map((step) => ({
             stepId: step.id,
             status: "PENDING",
-            output: undefined
+            output: null
         }));
 
         return {

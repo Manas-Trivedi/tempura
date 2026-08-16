@@ -22,8 +22,12 @@
   "type": "module",
   "devDependencies": {
     "@types/node": "^26.1.2",
+    "@types/pg": "^8.21.0",
     "tsx": "^4.23.5",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "pg": "^8.23.0"
   }
 }
