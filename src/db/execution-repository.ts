@@ -124,7 +124,8 @@ export class PostgresExecutionRepository implements ExecutionRepository {
 
             await client.query("BEGIN");
 
-            await client.query(
+
+            const result = await client.query(
                 `
                 UPDATE workflow_executions
                 SET status = $1
@@ -136,14 +137,18 @@ export class PostgresExecutionRepository implements ExecutionRepository {
                 ]
             );
 
+            if(result.rowCount !== 1) {
+                throw new Error(`Workflow execution not found: ${execution.id}`);
+            }
+
             for(const step of execution.steps) {
 
-                await client.query(
+                const stepUpdate = await client.query(
                     `
                     UPDATE step_executions
                     SET
-                        status = $1,
-                        output_payload = $2
+                    status = $1,
+                    output_payload = $2
                     WHERE workflow_execution_id = $3 AND step_id = $4
                     `,
                     [
@@ -153,6 +158,12 @@ export class PostgresExecutionRepository implements ExecutionRepository {
                         step.stepId
                     ]
                 );
+
+                if(stepUpdate.rowCount !== 1) {
+                    throw new Error(
+                        `Step execution not found: ${execution.id}/${step.stepId}`
+                    );
+                }
 
             }
 
