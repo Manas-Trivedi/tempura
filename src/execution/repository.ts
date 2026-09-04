@@ -1,4 +1,4 @@
-import type { WorkflowExecution } from "../domain/execution.js";
+import type { StepExecution, WorkflowExecution } from "../domain/execution.js";
 
 export interface ExecutionRepository {
 
@@ -7,5 +7,7 @@ export interface ExecutionRepository {
     getById(id: string): Promise<WorkflowExecution | null>;
 
     update(execution: WorkflowExecution): Promise<void>;
-    
+
+    updateStep(executionId: string, step: StepExecution): Promise<void>;
+
 }

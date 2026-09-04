@@ -121,9 +121,7 @@ export class PostgresExecutionRepository implements ExecutionRepository {
         const client = await this.pool.connect();
 
         try {
-
             await client.query("BEGIN");
-
 
             const result = await client.query(
                 `
@@ -171,6 +169,38 @@ export class PostgresExecutionRepository implements ExecutionRepository {
 
         } catch ( error ) {
             await client.query("ROLLBACK");
+            throw(error);
+        } finally {
+            client.release();
+        }
+
+    }
+
+    async updateStep(executionId: string, step: StepExecution): Promise<void> {
+        const client = await this.pool.connect();
+        try {
+            const stepUpdate = await client.query(
+                `
+                UPDATE step_executions
+                SET
+                status = $1,
+                output_payload = $2
+                WHERE workflow_execution_id = $3 AND step_id = $4
+                `,
+                [
+                    step.status,
+                    step.output,
+                    executionId,
+                    step.stepId
+                ]
+            );
+
+            if(stepUpdate.rowCount !== 1) {
+                throw new Error(
+                    `Step execution not found: ${executionId}/${step.stepId}`
+                );
+            }
+        } catch ( error ) {
             throw(error);
         } finally {
             client.release();

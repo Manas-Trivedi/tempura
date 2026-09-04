@@ -156,6 +156,51 @@ describe("PostgresExecutionRepository", () => {
         });
     });
 
+    test("updates a single step", async () => {
+        const execution: WorkflowExecution = {
+            id: crypto.randomUUID(),
+            workflowId: "test-workflow",
+            status: "PENDING",
+            input: {
+                userId: 123,
+                amount: 100
+            },
+            steps: [
+                {
+                    stepId: "A",
+                    status: "PENDING",
+                    output: null
+                },
+                {
+                    stepId: "B",
+                    status: "PENDING",
+                    output: null
+                }
+            ]
+        };
+
+        await repository.create(execution);
+
+        const stepB = execution.steps.find(
+            step => step.stepId === "B"
+        )!;
+
+        stepB.status = "COMPLETED";
+        stepB.output = { success: true };
+
+        await repository.updateStep(execution.id, stepB);
+
+        const updated = await repository.getById(execution.id);
+
+        expect(updated!.steps.find(
+            step => step.stepId === "B"
+        )!.status).toBe("COMPLETED");
+
+        expect(updated!.steps.find(
+            step => step.stepId === "B"
+        )!.output).toEqual({ success: true });
+    });
+
 });
 
 afterAll(async () => {
