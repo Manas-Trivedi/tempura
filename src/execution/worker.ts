@@ -55,7 +55,7 @@ export class Worker {
                 execution.id,
                 stepExecution
             );
-            
+
         }
     }
 
@@ -76,14 +76,33 @@ export class Worker {
             throw new Error(`No execution found: ${executionId}`);
         }
 
-        const readySteps = getReadySteps(workflow, execution);
+        execution.status = "RUNNING";
+        await this.repository.update(execution);
+        let readySteps = getReadySteps(workflow, execution);
 
-        await Promise.all(
-            readySteps.map((stepId) => {
-                const stepDef = stepMap.get(stepId)!;
-                return this.executeStep(stepDef, execution);
-            })
-        );
+        while(readySteps.length !== 0) {
+            try {
+                await Promise.all(
+                    readySteps.map((stepId) => {
+                        const stepDef = stepMap.get(stepId)!;
+                        return this.executeStep(stepDef, execution);
+                    })
+                );
+            } catch (error) {
+                // Step failures are persisted by executeStep.
+                // Continue scheduling independent steps.
+            }
+
+            readySteps = getReadySteps(workflow, execution);
+        }
+
+        if (execution.steps.every(step => step.status === "COMPLETED")) {
+            execution.status = "COMPLETED";
+            await this.repository.update(execution);
+        } else if (execution.steps.some(step => step.status === "FAILED")) {
+            execution.status = "FAILED";
+            await this.repository.update(execution);
+        }
 
     }
 

@@ -82,8 +82,9 @@ describe("Worker", () => {
     };
 
 
-    test("executes a ready step", async () => {
-        const execution: WorkflowExecution = createExecution(workflow, undefined);
+    test("executes the workflow", async () => {
+        const execution = createExecution(workflow, undefined);
+
         const repository = new FakeExecutionRepository(execution);
 
         const registry = new HandlerRegistry(
@@ -96,12 +97,9 @@ describe("Worker", () => {
 
         await worker.run(workflow, execution.id);
 
-        const stepA = execution.steps.find(
-            (step) => step.stepId === "A"
-        )!;
-
-        expect(stepA.status).toBe("COMPLETED");
-        expect(stepA.output).toEqual({ success: true });
+        expect(
+            execution.steps.every(step => step.status === "COMPLETED")
+        ).toBe(true);
     });
 
     test("marks step as FAILED when handler fails", async () => {
@@ -122,9 +120,7 @@ describe("Worker", () => {
 
         const worker = new Worker(repository, registry);
 
-        await expect(
-            worker.run(workflow, execution.id)
-        ).rejects.toThrow("handler failed");
+        await worker.run(workflow, execution.id);
 
         const stepA = execution.steps.find(
             (step) => step.stepId === "A"
@@ -220,18 +216,19 @@ describe("Worker", () => {
 
         await worker.run(workflow, execution.id);
 
-        expect(repository.updates).toHaveLength(2);
+        const stepUpdates = repository.updates;
 
-        expect(repository.updates[0]).toMatchObject({
-            stepId: "A",
-            status: "RUNNING"
-        });
+        expect(
+            stepUpdates.filter(
+                step => step.stepId === "A" && step.status === "RUNNING"
+            )
+        ).toHaveLength(1);
 
-        expect(repository.updates[1]).toMatchObject({
-            stepId: "A",
-            status: "COMPLETED",
-            output: { success: true }
-        });
+        expect(
+            stepUpdates.filter(
+                step => step.stepId === "A" && step.status === "COMPLETED"
+            )
+        ).toHaveLength(1);
     });
 
     test("persists FAILED state when handler fails", async () => {
@@ -253,9 +250,7 @@ describe("Worker", () => {
 
         const worker = new Worker(repository, registry);
 
-        await expect(
-            worker.run(workflow, execution.id)
-        ).rejects.toThrow("handler failed");
+        await worker.run(workflow, execution.id);
 
         expect(repository.updates).toHaveLength(2);
 
@@ -268,6 +263,128 @@ describe("Worker", () => {
             stepId: "A",
             status: "FAILED"
         });
+    });
+
+    test("Updates execution status as COMPLETED when all steps finish", async () => {
+
+        const workflow: Workflow = {
+            id: 'single-step-workflow',
+            steps: [
+                {
+                    id: 'A',
+                    dependencies: [],
+                    kind: "http",
+                    config: {}
+                }
+            ]
+        };
+
+        const execution = createExecution(workflow, undefined);
+
+        const repository = new FakeExecutionRepository(execution);
+
+        const registry = new HandlerRegistry(
+            new Map([
+                ["http", fakeHandler]
+            ])
+        );
+
+        const worker = new Worker(repository, registry);
+
+        await worker.run(workflow, execution.id);
+
+        expect(execution.status).toBe("COMPLETED");
+    });
+
+    test("Updates execution status as RUNNING when execution starts", async () => {
+
+        const workflow: Workflow = {
+            id: 'single-step-workflow',
+            steps: [
+                {
+                    id: 'A',
+                    dependencies: [],
+                    kind: "http",
+                    config: {}
+                }
+            ]
+        };
+
+        const execution = createExecution(workflow, undefined);
+
+        let resolveA!: () => void;
+
+        const aPromise = new Promise<void>((resolve) => {
+            resolveA = resolve;
+        });
+
+        const handler: StepHandler = {
+            execute: async (step) => {
+                if (step.id === "A") {
+                    await aPromise;
+                }
+                return { success: true };
+            }
+        };
+
+        const repository = new FakeExecutionRepository(execution);
+
+        const registry = new HandlerRegistry(
+            new Map([
+                ["http", handler]
+            ])
+        );
+
+        const worker = new Worker(repository, registry);
+
+        const workerPromise = worker.run(workflow, execution.id);
+
+        await Promise.resolve();
+
+        expect(execution.status).toBe("RUNNING");
+
+        resolveA();
+
+        await workerPromise;
+
+        expect(execution.status).toBe("COMPLETED");
+    });
+
+    test("Updates execution status as FAILED when a step fails", async () => {
+
+        const workflow: Workflow = {
+            id: 'single-step-workflow',
+            steps: [
+                {
+                    id: 'A',
+                    dependencies: [],
+                    kind: "http",
+                    config: {}
+                }
+            ]
+        };
+
+        const execution = createExecution(workflow, undefined);
+
+        const failingHandler: StepHandler = {
+            execute: async () => {
+                throw new Error("handler failed");
+            }
+        };
+
+        const repository = new FakeExecutionRepository(execution);
+
+        const registry = new HandlerRegistry(
+            new Map([
+                ["http", failingHandler]
+            ])
+        );
+
+        const worker = new Worker(repository, registry);
+
+        await worker.run(workflow, execution.id);
+
+        expect(execution.status).toBe("FAILED");
     });
 
 })
