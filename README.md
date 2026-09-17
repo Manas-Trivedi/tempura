@@ -1,102 +1,133 @@
 # 🍤 Tempura
 
-Tempura is a TypeScript-based workflow orchestration engine for defining, validating, and executing DAG-driven processes. The project is aimed at building a lightweight but durable runtime for dependency-aware workflows, with a focus on execution state tracking and persistence from the beginning.
+Tempura is a TypeScript workflow orchestration engine for defining, validating, and executing dependency-aware workflows as directed acyclic graphs (DAGs).
 
-> Status: active early-stage implementation with a working core model and persistence foundation
+The project now has an end-to-end in-process execution path: workflows are validated, executions are persisted, ready steps are scheduled, handlers run concurrently where dependencies allow, and step and workflow state is written back to PostgreSQL.
+
+> Status: active early-stage implementation. The execution core is working; queue-backed workers, retries, and the public API are still being built.
 
 ## What is implemented
 
-The codebase has already moved beyond the original placeholder stage and includes a working foundation for:
+- DAG validation with Kahn's algorithm
+- Workflow execution creation and lifecycle state transitions
+- Dependency-aware scheduling of ready steps
+- Parallel execution of independent steps
+- A worker that advances an execution until it completes or fails
+- Pluggable step handlers selected by step kind
+- Built-in HTTP step handler
+- PostgreSQL persistence for workflow and step executions
+- Transactional execution updates with missing-record checks
+- Application service that validates, persists, and starts workflows
+- Unit and integration tests covering the execution core
 
-- Workflow DAG validation using topological ordering logic
-- Execution creation for workflow runs
-- Step lifecycle state transitions
-- PostgreSQL-backed execution persistence
-- Repository-style storage for workflow execution records
-- Type-safe domain models for workflows and step execution
+## How execution works
 
-## Core capabilities
+`WorkflowService` is the application entry point for starting a workflow:
+
+1. Validate the workflow structure.
+2. Create a `PENDING` execution with one pending step execution per workflow step.
+3. Persist the execution and its steps.
+4. Start the worker.
+5. Find pending steps whose dependencies are complete.
+6. Run all currently ready steps concurrently.
+7. Persist each `RUNNING`, `COMPLETED`, or `FAILED` step transition.
+8. Continue through the graph until the execution is `COMPLETED` or `FAILED`.
+
+Independent branches run in parallel. A join step remains pending until every dependency has completed. When one step fails, the worker persists that failure and continues evaluating independent work; blocked dependent steps remain pending and the workflow finishes as failed.
+
+## Core components
 
 ### Workflow validation
 
-The engine validates workflow graphs to ensure they are valid DAGs before execution. The implementation in [src/graph/kahn.ts](src/graph/kahn.ts) checks for:
+[src/graph/kahn.ts](src/graph/kahn.ts) validates workflow structure by checking for:
 
 - duplicate step IDs
 - missing dependency references
-- cyclic graphs
-- valid topological ordering
+- cycles
+- a valid topological ordering
 
-This is based on Kahn's algorithm and provides a fast structural validation step for workflow definitions.
+### Scheduler and worker
 
-### Execution lifecycle
+[src/execution/scheduler.ts](src/execution/scheduler.ts) returns pending steps whose dependencies are all `COMPLETED`.
 
-Execution state is modeled in [src/domain/execution.ts](src/domain/execution.ts) and [src/execution/state.ts](src/execution/state.ts). Supported statuses include:
+[src/execution/worker.ts](src/execution/worker.ts) resolves step definitions, transitions steps to `RUNNING`, invokes their handlers, persists outputs, and updates the final workflow status.
 
-- `PENDING`
-- `RUNNING`
-- `COMPLETED`
-- `FAILED`
+### Handler system
 
-The system enforces valid transitions so a step cannot be marked complete unless it was started, and a pending step cannot be failed or completed.
+Handlers implement the `StepHandler` interface and are registered by `StepKind` through [src/handlers/registry.ts](src/handlers/registry.ts). The current supported kind is `http`, implemented by [src/handlers/http.ts](src/handlers/http.ts).
 
-### Persistence model
+HTTP steps support `GET`, `POST`, `PUT`, `PATCH`, and `DELETE`, optional headers, JSON input for methods with a body, and JSON response output. Non-successful HTTP responses fail the step.
 
-The PostgreSQL schema in [src/db/schema.sql](src/db/schema.sql) stores:
+### Persistence
 
-- workflow execution metadata
-- step execution status
-- execution input payloads
-- step output payloads
-- retry metadata hooks for future runtime behavior
+[src/db/schema.sql](src/db/schema.sql) stores workflow execution metadata and step execution state, including input and output JSON payloads and retry-count storage for future retry behavior.
 
-The repository layer in [src/db/execution-repository.ts](src/db/execution-repository.ts) can create, fetch, and update workflow executions in the database.
+[src/db/execution-repository.ts](src/db/execution-repository.ts) supports:
 
-## Current architecture
+- creating an execution and all of its steps in one transaction
+- fetching an execution by ID
+- updating an execution and all steps atomically
+- updating one step independently as it runs
+- detecting missing workflow or step records
 
-### Domain model
+## Domain model
 
-- `Workflow`: a workflow consists of multiple steps and an ID
-- `Step`: a workflow node with `id`, `dependencies`, `kind`, and `config`
-- `WorkflowExecution`: a single run of a workflow with input and step state
-- `StepExecution`: the state and output for one step in an execution
+- `Workflow`: an ID and an ordered collection of steps
+- `Step`: an ID, dependency list, handler kind, and handler configuration
+- `WorkflowExecution`: workflow ID, input, overall status, and step executions
+- `StepExecution`: step ID, status, and handler output
 
-### Execution flow
+Supported workflow and step statuses are `PENDING`, `RUNNING`, `COMPLETED`, and `FAILED`.
 
-A typical flow looks like this:
-
-1. define a workflow as a DAG
-2. validate the graph structure
-3. create a workflow execution instance
-4. persist the initial execution state
-5. schedule runnable steps based on dependency completion
-6. update step statuses as work progresses
-7. persist final state and outputs
-
-## Example workflow
+## Example
 
 ```ts
 const workflow = {
   id: "user-onboarding",
   steps: [
-    { id: "create-user", dependencies: [], kind: "http", config: {} },
-    { id: "send-welcome-email", dependencies: ["create-user"], kind: "http", config: {} },
-    { id: "grant-access", dependencies: ["create-user"], kind: "http", config: {} },
-    { id: "finalize-account", dependencies: ["send-welcome-email", "grant-access"], kind: "http", config: {} }
+    {
+      id: "create-user",
+      dependencies: [],
+      kind: "http",
+      config: {
+        method: "POST",
+        url: "https://example.com/users"
+      }
+    },
+    {
+      id: "send-welcome-email",
+      dependencies: ["create-user"],
+      kind: "http",
+      config: {
+        method: "POST",
+        url: "https://example.com/welcome-email"
+      }
+    },
+    {
+      id: "grant-access",
+      dependencies: ["create-user"],
+      kind: "http",
+      config: {
+        method: "POST",
+        url: "https://example.com/access"
+      }
+    }
   ]
 };
 ```
 
-This pattern supports both linear and parallel execution paths while preserving dependency correctness.
+`send-welcome-email` and `grant-access` become runnable after `create-user` completes and can execute in parallel.
 
 ## Tech stack
 
 - Runtime: Node.js
-- Language: TypeScript
-- Build/test: TypeScript + Vitest
-- Database: PostgreSQL
-- Containerization: Docker + Docker Compose
-- Data access: `pg` client
-- Execution model: strongly typed domain objects
+- Language: TypeScript with native ESM modules
+- Package manager: pnpm
+- Database: PostgreSQL 17
+- Data access: `pg`
+- Testing: Vitest
+- Local infrastructure: Docker Compose
+- Planned queue: Redis + BullMQ
 
 ## Development setup
 
@@ -105,22 +136,34 @@ This pattern supports both linear and parallel execution paths while preserving 
 - Node.js
 - pnpm
 - Docker and Docker Compose
-- PostgreSQL (for repository integration and persistence work)
-
-### Local database with Docker
-
-The project is already using Docker for local PostgreSQL via [docker-compose.yml](docker-compose.yml). This gives a consistent dev environment for the workflow persistence layer and makes it easy to extend toward Redis, BullMQ, and the app itself.
-
-```bash
-docker compose up -d
-```
-
-This starts the Postgres service with the expected `tempura` database and credentials used by the app and integration tests.
 
 ### Install dependencies
 
 ```bash
 pnpm install
+```
+
+### Start PostgreSQL
+
+PostgreSQL runs locally through [docker-compose.yml](docker-compose.yml):
+
+```bash
+docker compose up -d
+```
+
+The compose service creates the `tempura` database with the local development credentials configured in the repository. Redis, BullMQ, and the Tempura application container are planned additions to this environment.
+
+### Run the development process
+
+```bash
+pnpm dev
+```
+
+### Build and start the compiled app
+
+```bash
+pnpm build
+pnpm start
 ```
 
 ### Run tests
@@ -129,45 +172,35 @@ pnpm install
 pnpm test -- --run
 ```
 
-> Note: the repository integration tests currently expect a local PostgreSQL instance with both the `tempura` and `tempura_test` databases available. At the moment, `tempura_test` is created manually during local development, and the plan is to add it to the Docker Compose setup later as part of the full containerized dev environment.
-
-### Start the app
-
-```bash
-pnpm dev
-```
-
-## Containerization roadmap
-
-Tempura is designed to evolve into a fully containerized workflow runtime:
-
-- [x] PostgreSQL in Docker for local development
-- [ ] Redis + BullMQ in Docker for queueing and worker orchestration
-- [ ] containerized Tempura application runtime
-- [ ] production-ready Docker image and compose environment
+The PostgreSQL integration tests use the `tempura_test` database. That database is currently created manually during local development; it will be added to Docker Compose later. Unit tests for graph validation, scheduling, handlers, execution state, and worker behavior do not require PostgreSQL.
 
 ## Roadmap
 
-The project is now focused on the following milestones:
+Completed foundations:
 
 - [x] workflow DAG validation
-- [x] execution creation and step state transitions
-- [x] PostgreSQL persistence layer
-- [x] repository CRUD for workflow execution records
-- [x] Dockerized local Postgres development environment
-- [ ] Redis + BullMQ queue infrastructure in Docker
-- [ ] scheduler for dependency-aware step execution
-- [ ] background worker runtime
-- [ ] retry and failure policies
-- [ ] idempotent execution guarantees
-- [ ] queue/worker orchestration
-- [ ] app containerization for Tempura
-- [ ] compensation workflows and saga support
-- [ ] API layer and observability dashboard
+- [x] execution creation and state transitions
+- [x] dependency-aware scheduler
+- [x] parallel in-process worker execution
+- [x] pluggable handler registry
+- [x] HTTP step handler
+- [x] PostgreSQL execution repository
+- [x] Dockerized local PostgreSQL
+
+Next milestones:
+
+- [ ] retry policies and retry execution behavior
+- [ ] idempotency and recovery semantics
+- [ ] Redis and BullMQ queue integration
+- [ ] queue-backed background workers
+- [ ] containerized Tempura runtime
+- [ ] workflow registration and public API
+- [ ] execution observability and metrics
+- [ ] compensation workflows and Saga support
 
 ## Current direction
 
-Tempura is evolving from a foundational workflow engine into a more complete orchestration runtime. The near-term focus is on moving from static validation and persistence into scheduling, durable job execution, and operational resilience.
+Tempura is moving from a synchronous in-process execution core toward a durable distributed runtime. The next architectural step is separating workflow submission from worker execution with Redis/BullMQ, while preserving the current dependency scheduling, handler abstraction, and PostgreSQL-backed execution state.
 
 ---
 
